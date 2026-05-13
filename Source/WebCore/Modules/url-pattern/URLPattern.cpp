@@ -34,8 +34,7 @@
 #include "URLPatternOptions.h"
 #include "URLPatternParser.h"
 #include "URLPatternResult.h"
-#include <JavaScriptCore/JSGlobalObjectInlines.h>
-#include <JavaScriptCore/RegExp.h>
+#include <JavaScriptCore/VM.h>
 #include <wtf/RefCounted.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/URL.h>
@@ -44,9 +43,13 @@
 #include <wtf/text/StringToIntegerConversion.h>
 
 namespace WebCore {
-using namespace JSC;
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(URLPattern);
+
+URLPattern::URLPattern(bool shouldIgnoreCase)
+    : m_shouldIgnoreCase(shouldIgnoreCase)
+{
+}
 
 // https://urlpattern.spec.whatwg.org/#process-a-base-url-string
 static String processBaseURLString(StringView input, BaseURLStringType type)
@@ -212,7 +215,7 @@ static ExceptionOr<URLPatternInit> processInit(URLPatternInit&& init, BaseURLStr
 }
 
 // https://urlpattern.spec.whatwg.org/#url-pattern-create
-ExceptionOr<Ref<URLPattern>> URLPattern::create(ScriptExecutionContext& context, URLPatternInput&& input, String&& baseURL, URLPatternOptions&& options)
+static ExceptionOr<URLPatternInit> prepareInit(URLPattern::URLPatternInput&& input, String&& baseURL, ScriptExecutionContext* context)
 {
     URLPatternInit init;
 
@@ -259,9 +262,55 @@ ExceptionOr<Ref<URLPattern>> URLPattern::create(ScriptExecutionContext& context,
             processedInit.port = emptyString();
     }
 
-    Ref result = adoptRef(*new URLPattern(options.ignoreCase));
+    return processedInit;
+}
 
-    auto maybeCompileException = result->compileAllComponents(context, WTF::move(processedInit));
+// https://urlpattern.spec.whatwg.org/#build-a-url-pattern-from-a-web-idl-value
+ExceptionOr<Ref<URLPattern>> URLPattern::create(Compatible&& value, const String& baseURL)
+{
+    return switchOn(WTF::move(value),
+        [&](Ref<URLPattern>&& pattern) -> ExceptionOr<Ref<URLPattern>> {
+            return WTF::move(pattern);
+        },
+        [&](URLPatternInit&& init) -> ExceptionOr<Ref<URLPattern>> {
+            if (init.baseURL.isNull())
+                init.baseURL = baseURL;
+            return URLPattern::create(WTF::move(init), String { }, URLPatternOptions { });
+        },
+        [&](String&& string) -> ExceptionOr<Ref<URLPattern>> {
+            return URLPattern::create(WTF::move(string), String { baseURL }, URLPatternOptions { });
+        }
+    );
+}
+
+ExceptionOr<Ref<URLPattern>> URLPattern::create(URLPatternInput&& input, String&& baseURL, URLPatternOptions&& options)
+{
+    auto maybeInit = prepareInit(WTF::move(input), WTF::move(baseURL), nullptr);
+    if (maybeInit.hasException())
+        return maybeInit.releaseException();
+
+    Ref result = adoptRef(*new URLPattern(options.ignoreCase));
+    auto maybeCompileException = result->compileAllComponents(maybeInit.releaseReturnValue());
+    if (maybeCompileException.hasException())
+        return maybeCompileException.releaseException();
+
+    return result;
+}
+
+ExceptionOr<Ref<URLPattern>> URLPattern::create(URLPatternInput&& input, URLPatternOptions&& options)
+{
+    return create(WTF::move(input), String { }, WTF::move(options));
+}
+
+ExceptionOr<Ref<URLPattern>> URLPattern::create(ScriptExecutionContext& context, URLPatternInput&& input, String&& baseURL, URLPatternOptions&& options)
+{
+    auto maybeInit = prepareInit(WTF::move(input), WTF::move(baseURL), &context);
+    if (maybeInit.hasException())
+        return maybeInit.releaseException();
+
+    Ref result = adoptRef(*new URLPattern(options.ignoreCase));
+    result->m_context = context;
+    auto maybeCompileException = result->compileAllComponents(maybeInit.releaseReturnValue());
     if (maybeCompileException.hasException())
         return maybeCompileException.releaseException();
 
@@ -292,12 +341,11 @@ ExceptionOr<Ref<URLPattern>> URLPattern::create(ScriptExecutionContext& context,
     );
 }
 
-URLPattern::~URLPattern() = default;
 
 // https://urlpattern.spec.whatwg.org/#dom-urlpattern-test
-ExceptionOr<bool> URLPattern::test(ScriptExecutionContext& context, URLPatternInput&& input, String&& baseURL) const
+ExceptionOr<bool> URLPattern::test(URLPatternInput&& input, String&& baseURL) const
 {
-    auto maybeResult = match(context, WTF::move(input), WTF::move(baseURL));
+    auto maybeResult = match(WTF::move(input), WTF::move(baseURL));
     if (maybeResult.hasException())
         return maybeResult.releaseException();
 
@@ -305,57 +353,56 @@ ExceptionOr<bool> URLPattern::test(ScriptExecutionContext& context, URLPatternIn
 }
 
 // https://urlpattern.spec.whatwg.org/#dom-urlpattern-exec
-ExceptionOr<std::optional<URLPatternResult>> URLPattern::exec(ScriptExecutionContext& context, URLPatternInput&& input, String&& baseURL) const
+ExceptionOr<std::optional<URLPatternResult>> URLPattern::exec(URLPatternInput&& input, String&& baseURL) const
 {
-    return match(context, WTF::move(input), WTF::move(baseURL));
+    return match(WTF::move(input), WTF::move(baseURL));
 }
 
-ExceptionOr<void> URLPattern::compileAllComponents(ScriptExecutionContext& context, URLPatternInit&& processedInit)
+ExceptionOr<void> URLPattern::compileAllComponents(URLPatternInit&& processedInit)
 {
-    Ref vm = context.vm();
-    JSC::JSLockHolder lock(vm);
+    JSC::VM* vm = m_context ? &m_context->vm() : nullptr;
 
-    auto maybeProtocolComponent = URLPatternUtilities::URLPatternComponent::compile(vm, processedInit.protocol, EncodingCallbackType::Protocol, URLPatternUtilities::URLPatternStringOptions { });
+    auto maybeProtocolComponent = URLPatternUtilities::URLPatternComponent::compile(processedInit.protocol, EncodingCallbackType::Protocol, { }, vm);
     if (maybeProtocolComponent.hasException())
         return maybeProtocolComponent.releaseException();
     m_protocolComponent = maybeProtocolComponent.releaseReturnValue();
 
-    auto maybeUsernameComponent = URLPatternUtilities::URLPatternComponent::compile(vm, processedInit.username, EncodingCallbackType::Username, URLPatternUtilities::URLPatternStringOptions { });
+    auto maybeUsernameComponent = URLPatternUtilities::URLPatternComponent::compile(processedInit.username, EncodingCallbackType::Username, { }, vm);
     if (maybeUsernameComponent.hasException())
         return maybeUsernameComponent.releaseException();
     m_usernameComponent = maybeUsernameComponent.releaseReturnValue();
 
-    auto maybePasswordComponent = URLPatternUtilities::URLPatternComponent::compile(vm, processedInit.password, EncodingCallbackType::Password, URLPatternUtilities::URLPatternStringOptions { });
+    auto maybePasswordComponent = URLPatternUtilities::URLPatternComponent::compile(processedInit.password, EncodingCallbackType::Password, { }, vm);
     if (maybePasswordComponent.hasException())
         return maybePasswordComponent.releaseException();
     m_passwordComponent = maybePasswordComponent.releaseReturnValue();
 
     auto hostnameEncodingCallbackType = isHostnamePatternIPv6(processedInit.hostname) ? EncodingCallbackType::IPv6Host : EncodingCallbackType::Host;
-    auto maybeHostnameComponent = URLPatternUtilities::URLPatternComponent::compile(vm, processedInit.hostname, hostnameEncodingCallbackType, URLPatternUtilities::URLPatternStringOptions { .delimiterCodepoint = "."_s });
+    auto maybeHostnameComponent = URLPatternUtilities::URLPatternComponent::compile(processedInit.hostname, hostnameEncodingCallbackType, { .delimiterCodepoint = "."_s }, vm);
     if (maybeHostnameComponent.hasException())
         return maybeHostnameComponent.releaseException();
     m_hostnameComponent = maybeHostnameComponent.releaseReturnValue();
 
-    auto maybePortComponent = URLPatternUtilities::URLPatternComponent::compile(vm, processedInit.port, EncodingCallbackType::Port, URLPatternUtilities::URLPatternStringOptions { });
+    auto maybePortComponent = URLPatternUtilities::URLPatternComponent::compile(processedInit.port, EncodingCallbackType::Port, { }, vm);
     if (maybePortComponent.hasException())
         return maybePortComponent.releaseException();
     m_portComponent = maybePortComponent.releaseReturnValue();
 
     URLPatternUtilities::URLPatternStringOptions compileOptions { .ignoreCase = m_shouldIgnoreCase };
 
-    auto maybePathnameComponent = m_protocolComponent.matchSpecialSchemeProtocol(context)
-    ? URLPatternUtilities::URLPatternComponent::compile(vm, processedInit.pathname, EncodingCallbackType::Path, URLPatternUtilities::URLPatternStringOptions  { "/"_s, "/"_s, m_shouldIgnoreCase })
-    : URLPatternUtilities::URLPatternComponent::compile(vm, processedInit.pathname, EncodingCallbackType::OpaquePath, compileOptions);
+    auto maybePathnameComponent = m_protocolComponent.matchSpecialSchemeProtocol()
+        ? URLPatternUtilities::URLPatternComponent::compile(processedInit.pathname, EncodingCallbackType::Path, { "/"_s, "/"_s, m_shouldIgnoreCase }, vm)
+        : URLPatternUtilities::URLPatternComponent::compile(processedInit.pathname, EncodingCallbackType::OpaquePath, compileOptions, vm);
     if (maybePathnameComponent.hasException())
         return maybePathnameComponent.releaseException();
     m_pathnameComponent = maybePathnameComponent.releaseReturnValue();
 
-    auto maybeSearchComponent = URLPatternUtilities::URLPatternComponent::compile(vm, processedInit.search, EncodingCallbackType::Search, compileOptions);
+    auto maybeSearchComponent = URLPatternUtilities::URLPatternComponent::compile(processedInit.search, EncodingCallbackType::Search, compileOptions, vm);
     if (maybeSearchComponent.hasException())
         return maybeSearchComponent.releaseException();
     m_searchComponent = maybeSearchComponent.releaseReturnValue();
 
-    auto maybeHashComponent = URLPatternUtilities::URLPatternComponent::compile(vm, processedInit.hash, EncodingCallbackType::Hash, compileOptions);
+    auto maybeHashComponent = URLPatternUtilities::URLPatternComponent::compile(processedInit.hash, EncodingCallbackType::Hash, compileOptions, vm);
     if (maybeHashComponent.hasException())
         return maybeHashComponent.releaseException();
     m_hashComponent = maybeHashComponent.releaseReturnValue();
@@ -388,7 +435,7 @@ static inline void matchHelperAssignInputsFromInit(const URLPatternInit& input, 
 }
 
 // https://urlpattern.spec.whatwg.org/#url-pattern-match
-ExceptionOr<std::optional<URLPatternResult>> URLPattern::match(ScriptExecutionContext& context, Variant<URL, URLPatternInput>&& input, String&& baseURLString) const
+ExceptionOr<std::optional<URLPatternResult>> URLPattern::match(Variant<URL, URLPatternInput>&& input, String&& baseURLString) const
 {
     URLPatternResult result;
     String protocol, username, password, hostname, port, pathname, search, hash;
@@ -434,49 +481,47 @@ ExceptionOr<std::optional<URLPatternResult>> URLPattern::match(ScriptExecutionCo
             return { std::nullopt };
     }
 
-    auto protocolExecResult = m_protocolComponent.componentExec(context, protocol);
-    if (protocolExecResult.isNull() || protocolExecResult.isUndefined())
-        return { std::nullopt };
+    auto* context = m_context.get();
 
-    auto* globalObject = context.globalObject();
-    if (!globalObject)
-        return  { std::nullopt };
-    result.protocol = m_protocolComponent.createComponentMatchResult(globalObject, WTF::move(protocol), protocolExecResult);
-
-    auto usernameExecResult = m_usernameComponent.componentExec(context, username);
-    if (usernameExecResult.isNull() || usernameExecResult.isUndefined())
+    auto protocolExecResult = m_protocolComponent.componentExec(protocol, context);
+    if (!protocolExecResult)
         return { std::nullopt };
-    result.username = m_usernameComponent.createComponentMatchResult(globalObject, WTF::move(username), usernameExecResult);
+    result.protocol = m_protocolComponent.createComponentMatchResult(WTF::move(protocol), *protocolExecResult);
 
-    auto passwordExecResult = m_passwordComponent.componentExec(context, password);
-    if (passwordExecResult.isNull() || passwordExecResult.isUndefined())
+    auto usernameExecResult = m_usernameComponent.componentExec(username, context);
+    if (!usernameExecResult)
         return { std::nullopt };
-    result.password = m_passwordComponent.createComponentMatchResult(globalObject, WTF::move(password), passwordExecResult);
+    result.username = m_usernameComponent.createComponentMatchResult(WTF::move(username), *usernameExecResult);
 
-    auto hostnameExecResult = m_hostnameComponent.componentExec(context, hostname);
-    if (hostnameExecResult.isNull() || hostnameExecResult.isUndefined())
+    auto passwordExecResult = m_passwordComponent.componentExec(password, context);
+    if (!passwordExecResult)
         return { std::nullopt };
-    result.hostname = m_hostnameComponent.createComponentMatchResult(globalObject, WTF::move(hostname), hostnameExecResult);
+    result.password = m_passwordComponent.createComponentMatchResult(WTF::move(password), *passwordExecResult);
 
-    auto pathnameExecResult = m_pathnameComponent.componentExec(context, pathname);
-    if (pathnameExecResult.isNull() || pathnameExecResult.isUndefined())
+    auto hostnameExecResult = m_hostnameComponent.componentExec(hostname, context);
+    if (!hostnameExecResult)
         return { std::nullopt };
-    result.pathname = m_pathnameComponent.createComponentMatchResult(globalObject, WTF::move(pathname), pathnameExecResult);
+    result.hostname = m_hostnameComponent.createComponentMatchResult(WTF::move(hostname), *hostnameExecResult);
 
-    auto portExecResult = m_portComponent.componentExec(context, port);
-    if (portExecResult.isNull() || portExecResult.isUndefined())
+    auto pathnameExecResult = m_pathnameComponent.componentExec(pathname, context);
+    if (!pathnameExecResult)
         return { std::nullopt };
-    result.port = m_portComponent.createComponentMatchResult(globalObject, WTF::move(port), portExecResult);
+    result.pathname = m_pathnameComponent.createComponentMatchResult(WTF::move(pathname), *pathnameExecResult);
 
-    auto searchExecResult = m_searchComponent.componentExec(context, search);
-    if (searchExecResult.isNull() || searchExecResult.isUndefined())
+    auto portExecResult = m_portComponent.componentExec(port, context);
+    if (!portExecResult)
         return { std::nullopt };
-    result.search = m_searchComponent.createComponentMatchResult(globalObject, WTF::move(search), searchExecResult);
+    result.port = m_portComponent.createComponentMatchResult(WTF::move(port), *portExecResult);
 
-    auto hashExecResult = m_hashComponent.componentExec(context, hash);
-    if (hashExecResult.isNull() || hashExecResult.isUndefined())
+    auto searchExecResult = m_searchComponent.componentExec(search, context);
+    if (!searchExecResult)
         return { std::nullopt };
-    result.hash = m_hashComponent.createComponentMatchResult(globalObject, WTF::move(hash), hashExecResult);
+    result.search = m_searchComponent.createComponentMatchResult(WTF::move(search), *searchExecResult);
+
+    auto hashExecResult = m_hashComponent.componentExec(hash, context);
+    if (!hashExecResult)
+        return { std::nullopt };
+    result.hash = m_hashComponent.createComponentMatchResult(WTF::move(hash), *hashExecResult);
 
     return { result };
 }

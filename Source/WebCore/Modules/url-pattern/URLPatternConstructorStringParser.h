@@ -46,10 +46,10 @@ enum class URLPatternConstructorStringParserState : uint8_t { Init, Protocol, Au
 class URLPatternConstructorStringParser {
 public:
     explicit URLPatternConstructorStringParser(String&& input);
-    ExceptionOr<URLPatternInit> parse(ScriptExecutionContext&);
+    ExceptionOr<URLPatternInit> parse(ScriptExecutionContext* = nullptr);
 
 private:
-    void performParse(ScriptExecutionContext&);
+    void performParse(ScriptExecutionContext* = nullptr);
     void NODELETE rewind();
     const URLPatternUtilities::Token& NODELETE getSafeToken(size_t index) const;
     bool NODELETE isNonSpecialPatternChararacter(size_t index, char value) const;
@@ -57,8 +57,8 @@ private:
     bool NODELETE isAuthoritySlashesNext() const;
     String makeComponentString() const;
     void changeState(URLPatternConstructorStringParserState, size_t skip);
-    void updateState(ScriptExecutionContext&);
-    ExceptionOr<void> computeProtocolMatchSpecialSchemeFlag(ScriptExecutionContext&);
+    void updateState(ScriptExecutionContext* = nullptr);
+    ExceptionOr<void> computeProtocolMatchSpecialSchemeFlag(ScriptExecutionContext* = nullptr);
 
     StringView m_input;
     Vector<URLPatternUtilities::Token> m_tokenList;

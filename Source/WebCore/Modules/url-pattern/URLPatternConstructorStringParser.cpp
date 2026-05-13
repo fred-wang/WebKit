@@ -32,11 +32,8 @@
 #include "URLPatternInit.h"
 #include "URLPatternParser.h"
 #include "URLPatternTokenizer.h"
-#include <JavaScriptCore/RegExp.h>
-#include <JavaScriptCore/StrongInlines.h>
 
 namespace WebCore {
-using namespace JSC;
 
 URLPatternConstructorStringParser::URLPatternConstructorStringParser(String&& input)
     : m_input(WTF::move(input))
@@ -147,18 +144,14 @@ static inline void setInitComponentFromState(URLPatternInit& init, URLPatternCon
 }
 
 // https://urlpattern.spec.whatwg.org/#compute-protocol-matches-a-special-scheme-flag
-ExceptionOr<void> URLPatternConstructorStringParser::computeProtocolMatchSpecialSchemeFlag(ScriptExecutionContext& context)
+ExceptionOr<void> URLPatternConstructorStringParser::computeProtocolMatchSpecialSchemeFlag(ScriptExecutionContext* context)
 {
-    Ref vm = context.vm();
-    JSC::JSLockHolder lock(vm);
-
-    auto maybeProtocolComponent = URLPatternUtilities::URLPatternComponent::compile(vm, makeComponentString(), EncodingCallbackType::Protocol, URLPatternUtilities::URLPatternStringOptions { });
+    auto maybeProtocolComponent = URLPatternUtilities::URLPatternComponent::compile(makeComponentString(), EncodingCallbackType::Protocol, URLPatternUtilities::URLPatternStringOptions { }, context ? &context->vm() : nullptr);
     if (maybeProtocolComponent.hasException())
         return maybeProtocolComponent.releaseException();
 
     auto protocolComponent = maybeProtocolComponent.releaseReturnValue();
-    m_protocolMatchesSpecialSchemeFlag = protocolComponent.matchSpecialSchemeProtocol(context);
-
+    m_protocolMatchesSpecialSchemeFlag = protocolComponent.matchSpecialSchemeProtocol();
     return { };
 }
 
@@ -202,7 +195,7 @@ void URLPatternConstructorStringParser::changeState(URLPatternConstructorStringP
     m_tokenIncrement = 0;
 }
 
-void URLPatternConstructorStringParser::updateState(ScriptExecutionContext& context)
+void URLPatternConstructorStringParser::updateState(ScriptExecutionContext* context)
 {
     switch (m_state) {
     case URLPatternConstructorStringParserState::Init:
@@ -303,7 +296,7 @@ void URLPatternConstructorStringParser::updateState(ScriptExecutionContext& cont
     }
 }
 
-void URLPatternConstructorStringParser::performParse(ScriptExecutionContext& context)
+void URLPatternConstructorStringParser::performParse(ScriptExecutionContext* context)
 {
     while (m_tokenIndex < m_tokenList.size()) {
         m_tokenIncrement = 1;
@@ -355,7 +348,7 @@ void URLPatternConstructorStringParser::performParse(ScriptExecutionContext& con
 }
 
 // https://urlpattern.spec.whatwg.org/#parse-a-constructor-string
-ExceptionOr<URLPatternInit> URLPatternConstructorStringParser::parse(ScriptExecutionContext& context)
+ExceptionOr<URLPatternInit> URLPatternConstructorStringParser::parse(ScriptExecutionContext* context)
 {
     auto maybeTokenList = URLPatternUtilities::Tokenizer(m_input, URLPatternUtilities::TokenizePolicy::Lenient).tokenize();
     if (maybeTokenList.hasException())

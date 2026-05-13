@@ -73,7 +73,7 @@ static bool matches(const SpeculationRules::URLPatternPredicate& predicate, HTML
             continue;
 
         Ref<URLPattern> pattern = exceptionOrPattern.returnValue();
-        auto result = pattern->test(protect(anchor.document()), anchor.href().string(), String(anchor.document().baseURL().string()));
+        auto result = pattern->test(anchor.href().string(), String(anchor.document().baseURL().string()));
         if (!result.hasException() && result.returnValue())
             return true;
     }

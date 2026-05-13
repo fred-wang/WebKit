@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2024 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -26,12 +27,21 @@
 #pragma once
 
 #include <JavaScriptCore/Strong.h>
+#include <memory>
+#include <wtf/RefPtr.h>
+#include <wtf/Vector.h>
+#include <wtf/text/WTFString.h>
+
+namespace WTF {
+class BumpPointerAllocator;
+}
 
 namespace JSC {
 class RegExp;
 class VM;
-class JSValue;
-}
+namespace Yarr {
+struct BytecodePattern;
+} }
 
 namespace WebCore {
 
@@ -45,19 +55,29 @@ struct URLPatternStringOptions;
 
 class URLPatternComponent {
 public:
-    static ExceptionOr<URLPatternComponent> compile(Ref<JSC::VM>, StringView, EncodingCallbackType, const URLPatternStringOptions&);
+    static ExceptionOr<URLPatternComponent> compile(StringView, EncodingCallbackType, const URLPatternStringOptions&, JSC::VM* = nullptr);
     const String& patternString() const LIFETIME_BOUND { return m_patternString; }
     bool hasRegexGroupsFromPartList() const { return m_hasRegexGroupsFromPartList; }
-    bool matchSpecialSchemeProtocol(ScriptExecutionContext&) const;
-    JSC::JSValue componentExec(ScriptExecutionContext&, StringView) const;
-    URLPatternComponentResult createComponentMatchResult(JSC::JSGlobalObject*, String&& input, const JSC::JSValue& execResult) const;
+    bool matchSpecialSchemeProtocol() const;
+    std::optional<Vector<unsigned>> componentExec(StringView, ScriptExecutionContext* = nullptr) const;
+    URLPatternComponentResult createComponentMatchResult(String&& input, const Vector<unsigned>& offsets) const;
     URLPatternComponent();
+    ~URLPatternComponent();
+    URLPatternComponent(URLPatternComponent&&);
+    URLPatternComponent& operator=(URLPatternComponent&&);
 
 private:
-    URLPatternComponent(String&&, JSC::Strong<JSC::RegExp>&&, Vector<String>&&, bool);
+    struct CompiledPattern {
+        std::unique_ptr<WTF::BumpPointerAllocator> allocator;
+        std::unique_ptr<JSC::Yarr::BytecodePattern> bytecode;
+    };
+
+    URLPatternComponent(String&&, std::unique_ptr<CompiledPattern>&&, JSC::Strong<JSC::RegExp>&&, RefPtr<JSC::VM>&&, Vector<String>&&, bool);
 
     String m_patternString;
-    JSC::Strong<JSC::RegExp> m_regularExpression;
+    std::unique_ptr<CompiledPattern> m_compiledPattern;
+    JSC::Strong<JSC::RegExp> m_jitRegExp;
+    RefPtr<JSC::VM> m_vm;
     Vector<String> m_groupNameList;
     bool m_hasRegexGroupsFromPartList { false };
 };

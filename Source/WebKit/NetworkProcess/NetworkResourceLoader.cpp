@@ -108,10 +108,10 @@
 #include "WebParentalControlsURLFilter.h"
 #endif
 
-#if PLATFORM(COCOA)
-#include "PathsBlockedForSandboxExtensions.h"
-#include <wtf/cocoa/RuntimeApplicationChecksCocoa.h>
-#endif
+#include <WebCore/JSFetchRequestDestination.h>
+#include <WebCore/RFC8941.h>
+#include <WebCore/URLPattern.h>
+#include <WebCore/URLPatternOptions.h>
 
 #define LOADER_RELEASE_LOG_WITH_THIS(thisPtr, fmt, ...) RELEASE_LOG(Network, "%p - [pageProxyID=%" PRIu64 ", webPageID=%" PRIu64 ", frameID=%" PRIu64 ", resourceID=%" PRIu64 ", isMainResource=%d, destination=%u, isSynchronous=%d] NetworkResourceLoader::" fmt, WTF::getPtr(thisPtr), thisPtr->webPageProxyID().toUInt64(), thisPtr->pageID().toUInt64(), thisPtr->frameID().toUInt64(), thisPtr->coreIdentifier().toUInt64(), thisPtr->isMainResource(), static_cast<unsigned>(thisPtr->m_parameters.options.destination), thisPtr->isSynchronous(), ##__VA_ARGS__)
 #define LOADER_RELEASE_LOG(fmt, ...) RELEASE_LOG(Network, "%p - [pageProxyID=%" PRIu64 ", webPageID=%" PRIu64 ", frameID=%" PRIu64 ", resourceID=%" PRIu64 ", isMainResource=%d, destination=%u, isSynchronous=%d] NetworkResourceLoader::" fmt, this, webPageProxyID().toUInt64(), pageID().toUInt64(), frameID().toUInt64(), coreIdentifier().toUInt64(), isMainResource(), static_cast<unsigned>(m_parameters.options.destination), isSynchronous(), ##__VA_ARGS__)
@@ -449,8 +449,10 @@ void NetworkResourceLoader::startNetworkLoad(ResourceRequest&& request, FirstLoa
         if (isSynchronous() || m_parameters.maximumBufferingTime > 0_s)
             m_bufferedData.empty();
 
-        if (canUseCache(request))
+        if (canUseCache(request)) {
             m_bufferedDataForCache.empty();
+            m_compressionDictionaryDataForCache.reset();
+        }
     }
 
     NetworkLoadParameters parameters = m_parameters.networkLoadParameters();
@@ -944,6 +946,87 @@ void NetworkResourceLoader::processClearSiteDataHeader(const WebCore::ResourceRe
     }
 }
 
+void NetworkResourceLoader::processUseAsDictionaryHeader(const WebCore::ResourceResponse& response)
+{
+    // https://fetch.spec.whatwg.org/#http-network-or-cache-fetch
+    // 19. If request’s response tainting is not "opaque" and response’s header list contains `Use-As-Dictionary`:
+    // 19.1 Let dictionaryValue be the result of getting a structured field value given `Use-As-Dictionary`, "dictionary", and response’s header list.
+    // 19.2 If dictionaryValue is null or dictionaryValue["match"] does not exist, then return response.
+    if (response.tainting() == ResourceResponse::Tainting::Opaque)
+        return;
+
+    auto dictionaryValue = RFC8941::parseDictionaryStructuredFieldValue(response.httpHeaderField(HTTPHeaderName::UseAsDictionary));
+    if (!dictionaryValue)
+        return;
+
+    // https://www.rfc-editor.org/rfc/rfc9842#name-use-as-dictionary
+    WebKit::NetworkCache::Entry::CompressionDictionaryData data;
+    for (auto& [name, valueAndParameters] : *dictionaryValue) {
+        if (name == "match-dest"_s) {
+            RFC8941::InnerList* innerList = std::get_if<RFC8941::InnerList>(&valueAndParameters.first);
+            if (!innerList)
+                continue;
+            if (!innerList->isEmpty()) {
+                for (auto& itemAndParameters : *innerList) {
+                    auto& item = itemAndParameters.first;
+                    const auto* stringValue = std::get_if<String>(&item);
+                    if (!stringValue)
+                        return;
+                    auto destination = WebCore::parseEnumerationFromString<WebCore::FetchRequestDestination>(*stringValue);
+                    if (destination)
+                        data.matchDest.appendIfNotContains(*destination);
+                }
+                if (data.matchDest.isEmpty())
+                    return;
+            }
+        }
+        const auto* bareItem = std::get_if<RFC8941::BareItem>(&valueAndParameters.first);
+        if (!bareItem)
+            continue;
+        const auto* stringValue = std::get_if<String>(bareItem);
+        if (!stringValue)
+            return;
+        if (name == "match"_s)
+            data.match = *stringValue;
+        static constexpr size_t compressionDictionaryIdMaxLength = 1024;
+        if (name == "id"_s) {
+            if (stringValue->length() > compressionDictionaryIdMaxLength)
+                return;
+            data.id = *stringValue;
+        }
+        if (name == "type"_s && *stringValue != "raw"_s)
+            return;
+    }
+    if (data.match.isEmpty())
+        return;
+
+    // 19.6 Let compressionDictionaryCache be the result of determining the compression-dictionary cache partition given request.
+    // 19.7 If compressionDictionaryCache is null, then return response.
+    CheckedPtr session = connectionToWebProcess().networkProcess().networkSession(sessionID());
+    if (!session)
+        return;
+
+    // 19.8 Let pattern be the result of creating a URL pattern given the bare item of dictionaryValue["match"], the serialization of request’s current URL, and an empty map. If this throws an exception, then return response.
+    String currentURL = m_networkLoad->currentRequest().url().string();
+
+    auto result = WebCore::URLPattern::create(data.match, WTF::move(currentURL), { });
+    if (result.hasException())
+        return;
+
+    // 19.9 If pattern is failure or pattern has regexp groups, then return response.
+    if (result.returnValue()->hasRegExpGroups())
+        return;
+
+    // 19.10 Let expirationTime be the time at which the response becomes a stale response.
+    // 19.11 If expirationTime is not in the future, then return response.
+    auto responseTimestamp = WallTime::now();
+    if (WebCore::computeFreshnessLifetimeForHTTPFamily(response, responseTimestamp) < computeCurrentAge(response, responseTimestamp))
+        return;
+
+    // 19.12 Store response in compressionDictionaryCache with its associated pattern, dictionaryValue and expirationTime.
+    m_compressionDictionaryDataForCache = data;
+}
+
 static BrowsingContextGroupSwitchDecision NODELETE toBrowsingContextGroupSwitchDecision(const std::optional<CrossOriginOpenerPolicyEnforcementResult>& currentCoopEnforcementResult)
 {
     if (!currentCoopEnforcementResult || !currentCoopEnforcementResult->needsBrowsingContextGroupSwitch)
@@ -1120,8 +1203,10 @@ void NetworkResourceLoader::didReceiveResponse(ResourceResponse&& receivedRespon
     if (!isSynchronous() && m_response.isMultipart())
         m_bufferedData.reset();
 
-    if (m_response.isMultipart())
+    if (m_response.isMultipart()) {
         m_bufferedDataForCache.reset();
+        m_compressionDictionaryDataForCache.reset();
+    }
 
     if (m_cacheEntryForValidation) {
         bool validationSucceeded = m_response.httpStatusCode() == httpStatus304NotModified;
@@ -1188,6 +1273,9 @@ void NetworkResourceLoader::didReceiveResponse(ResourceResponse&& receivedRespon
     }
 
     processClearSiteDataHeader(m_response, [this, protectedThis = Ref { *this }, privateRelayed, resourceLoadInfo = WTF::move(resourceLoadInfo), completionHandler = WTF::move(completionHandler)] () mutable {
+        if (connectionToWebProcess().compressionDictionaryEnabled())
+            processUseAsDictionaryHeader(m_response);
+
         auto response = sanitizeResponseIfPossible(ResourceResponse { m_response }, ResourceResponse::SanitizationType::CrossOriginSafe);
         if (isSynchronous()) {
             LOADER_RELEASE_LOG("didReceiveResponse: Using response for synchronous load");
@@ -1998,6 +2086,11 @@ void NetworkResourceLoader::tryStoreAsCacheEntry()
     if (!m_bufferedDataForCache) {
         LOADER_RELEASE_LOG("tryStoreAsCacheEntry: Not storing cache entry because m_bufferedDataForCache is null");
         return;
+    }
+
+    if (m_compressionDictionaryDataForCache) {
+        protect(m_cache)->storeCompressionDictionary(m_networkLoad->currentRequest(), m_response, m_bufferedDataForCache.copyBuffer(), *m_compressionDictionaryDataForCache, [](auto&& mappedBody) mutable { });
+        m_compressionDictionaryDataForCache.reset();
     }
 
     if (isCrossOriginPrefetch()) {

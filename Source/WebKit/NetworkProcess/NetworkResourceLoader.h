@@ -260,6 +260,7 @@ private:
 
     enum class FirstLoad : bool { No, Yes };
     void startNetworkLoad(WebCore::ResourceRequest&&, FirstLoad);
+    void continueStartNetworkLoadAfterCompressionDictionaryRetrieval(WebCore::ResourceRequest&&, NetworkLoadParameters);
     void restartNetworkLoad(WebCore::ResourceRequest&&, CompletionHandler<void(WebCore::ResourceRequest&&)>&&);
     void continueDidReceiveResponse();
     void didReceiveMainResourceResponse(const WebCore::ResourceResponse&);
@@ -369,6 +370,7 @@ private:
     RefPtr<NetworkCache::Cache> m_cache;
     WebCore::SharedBufferBuilder m_bufferedDataForCache;
     std::optional<WebKit::NetworkCache::Entry::CompressionDictionaryData> m_compressionDictionaryDataForCache;
+    std::optional<std::array<uint8_t, 32>> m_compressionDictionaryHash;
     std::unique_ptr<NetworkCache::Entry> m_cacheEntryForValidation;
     std::unique_ptr<NetworkCache::Entry> m_cacheEntryForMaxAgeCapValidation;
     bool m_isWaitingContinueWillSendRequestForCachedRedirect { false };

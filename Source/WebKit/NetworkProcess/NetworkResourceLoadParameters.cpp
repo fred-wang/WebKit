@@ -103,7 +103,10 @@ NetworkLoadParameters NetworkResourceLoadParameters::networkLoadParameters() con
         advancedPrivacyProtections,
         isInitiatedByDedicatedWorker,
         requiredCookiesVersion,
-        navigationLosesFrameSpecificStorageAccess
+        navigationLosesFrameSpecificStorageAccess,
+        false, // compressionDictionaryEnabled
+        std::nullopt, // compressionDictionaryHash
+        options.destination, // compressionDictionaryDestination
     };
 }
 

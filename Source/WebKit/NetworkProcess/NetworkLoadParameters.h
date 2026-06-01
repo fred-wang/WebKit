@@ -35,6 +35,7 @@
 #include <WebCore/ResourceLoaderOptions.h>
 #include <WebCore/ResourceRequest.h>
 #include <WebCore/SecurityOrigin.h>
+#include <WebCore/SharedBuffer.h>
 #include <wtf/ProcessID.h>
 
 namespace WebKit {
@@ -72,6 +73,10 @@ struct NetworkLoadParameters {
     // the WebProcess). We should block storage access cookies on this load's network requests without
     // revoking the frame's storage from JS until the navigation load commits.
     bool navigationLosesFrameSpecificStorageAccess { false };
+
+    bool compressionDictionaryEnabled { false };
+    std::optional<std::array<uint8_t, 32>> compressionDictionaryHash;
+    WebCore::FetchOptionsDestination compressionDictionaryDestination { WebCore::FetchOptionsDestination::EmptyString };
 };
 
 } // namespace WebKit

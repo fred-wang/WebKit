@@ -112,6 +112,8 @@
 #include <WebCore/RFC8941.h>
 #include <WebCore/URLPattern.h>
 #include <WebCore/URLPatternOptions.h>
+#include <wtf/StdLibExtras.h>
+#include <wtf/text/Base64.h>
 
 #define LOADER_RELEASE_LOG_WITH_THIS(thisPtr, fmt, ...) RELEASE_LOG(Network, "%p - [pageProxyID=%" PRIu64 ", webPageID=%" PRIu64 ", frameID=%" PRIu64 ", resourceID=%" PRIu64 ", isMainResource=%d, destination=%u, isSynchronous=%d] NetworkResourceLoader::" fmt, WTF::getPtr(thisPtr), thisPtr->webPageProxyID().toUInt64(), thisPtr->pageID().toUInt64(), thisPtr->frameID().toUInt64(), thisPtr->coreIdentifier().toUInt64(), thisPtr->isMainResource(), static_cast<unsigned>(thisPtr->m_parameters.options.destination), thisPtr->isSynchronous(), ##__VA_ARGS__)
 #define LOADER_RELEASE_LOG(fmt, ...) RELEASE_LOG(Network, "%p - [pageProxyID=%" PRIu64 ", webPageID=%" PRIu64 ", frameID=%" PRIu64 ", resourceID=%" PRIu64 ", isMainResource=%d, destination=%u, isSynchronous=%d] NetworkResourceLoader::" fmt, this, webPageProxyID().toUInt64(), pageID().toUInt64(), frameID().toUInt64(), coreIdentifier().toUInt64(), isMainResource(), static_cast<unsigned>(m_parameters.options.destination), isSynchronous(), ##__VA_ARGS__)
@@ -483,6 +485,39 @@ void NetworkResourceLoader::startNetworkLoad(ResourceRequest&& request, FirstLoa
         parameters.blobFileReferences = networkSession->blobRegistry().filesInBlob(originalRequest().url(), parameters.topOrigin ? std::optional { parameters.topOrigin->data() } : std::nullopt);
     }
 
+    // https://fetch.spec.whatwg.org/#http-network-compression-dictionary-fetch
+    // 3. If request’s mode is "no-cors", then return the result of running fallback.
+    // 4. If the user agent is configured to block cookies for request, then return the result of running fallback.
+    // 5. If request’s client is not a secure context, then return the result of running fallback.
+    CheckedPtr networkStorageSession = connectionToWebProcess().networkProcess().storageSession(sessionID());
+    ASSERT(networkStorageSession);
+    if (connectionToWebProcess().compressionDictionaryEnabled()
+        && canUseCache(request) && m_parameters.options.mode != FetchOptions::Mode::NoCors
+        && !networkStorageSession->shouldBlockCookies(originalRequest().firstPartyForCookies(), originalRequest().url(), frameID(), pageID(), ShouldRelaxThirdPartyCookieBlocking::No, IsKnownCrossSiteTracker::No)
+        && SecurityOrigin::isSecure(request.url())) {
+        // 6. Let compressionDictionaryCache be the result of determining the compression-dictionary cache partition given request.
+        // 7. If compressionDictionaryCache is null, then return the result of running fallback.
+        // 8. Let bestMatch be the result of finding the best matching dictionary in compressionDictionaryCache for request.
+        protect(m_cache)->retrieveCompressionDictionaryBestMatchHash(WTF::move(request), m_parameters.options.destination, [protectedThis = Ref { *this }, parameters = WTF::move(parameters)](auto&& request, auto&& match) mutable {
+            // 9. If bestMatch is null, then return the result of running fallback.
+            if (match) {
+                protectedThis->m_compressionDictionaryHash = match->hash;
+                // 10. Add the Available-Dictionary and Dictionary-ID (if applicable) headers to request using bestMatch.
+                //     The Available-Dictionary header (and Accept-Encoding, steps 11-12) are added by the
+                //     network library (e.g. libsoup); only Dictionary-ID must be set here.
+                request.setCompressionDictionaryIDHeader(match->id);
+            } else
+                protectedThis->m_compressionDictionaryHash = std::nullopt;
+            protectedThis->continueStartNetworkLoadAfterCompressionDictionaryRetrieval(WTF::move(request), WTF::move(parameters));
+        });
+        return;
+    }
+    continueStartNetworkLoadAfterCompressionDictionaryRetrieval(WTF::move(request), WTF::move(parameters));
+}
+
+void NetworkResourceLoader::continueStartNetworkLoadAfterCompressionDictionaryRetrieval(ResourceRequest&& request, NetworkLoadParameters parameters)
+{
+    CheckedPtr networkSession = protect(connectionToWebProcess())->networkSession();
     if (shouldSendResourceLoadMessages()) {
         std::optional<IPC::FormDataReference> httpBody;
         if (RefPtr formData = request.httpBody()) {
@@ -504,6 +539,10 @@ void NetworkResourceLoader::startNetworkLoad(ResourceRequest&& request, FirstLoa
 
     parameters.request = WTF::move(request);
     parameters.isNavigatingToAppBoundDomain = m_parameters.isNavigatingToAppBoundDomain;
+    parameters.compressionDictionaryEnabled = connectionToWebProcess().compressionDictionaryEnabled();
+    if (m_compressionDictionaryHash)
+        parameters.compressionDictionaryHash = m_compressionDictionaryHash;
+    parameters.compressionDictionaryDestination = m_parameters.options.destination;
     m_networkLoad = NetworkLoad::create(*this, WTF::move(parameters), *networkSession);
     
     WeakPtr weakThis { *this };
@@ -949,10 +988,10 @@ void NetworkResourceLoader::processClearSiteDataHeader(const WebCore::ResourceRe
 void NetworkResourceLoader::processUseAsDictionaryHeader(const WebCore::ResourceResponse& response)
 {
     // https://fetch.spec.whatwg.org/#http-network-or-cache-fetch
-    // 19. If request’s response tainting is not "opaque" and response’s header list contains `Use-As-Dictionary`:
+    // 19. If request’s response tainting is not "opaque", request’s client is a secure context, and response’s header list contains `Use-As-Dictionary`:
     // 19.1 Let dictionaryValue be the result of getting a structured field value given `Use-As-Dictionary`, "dictionary", and response’s header list.
     // 19.2 If dictionaryValue is null or dictionaryValue["match"] does not exist, then return response.
-    if (response.tainting() == ResourceResponse::Tainting::Opaque)
+    if (response.tainting() == ResourceResponse::Tainting::Opaque || !SecurityOrigin::isSecure(response.url()))
         return;
 
     auto dictionaryValue = RFC8941::parseDictionaryStructuredFieldValue(response.httpHeaderField(HTTPHeaderName::UseAsDictionary));
@@ -1009,12 +1048,12 @@ void NetworkResourceLoader::processUseAsDictionaryHeader(const WebCore::Resource
     // 19.8 Let pattern be the result of creating a URL pattern given the bare item of dictionaryValue["match"], the serialization of request’s current URL, and an empty map. If this throws an exception, then return response.
     String currentURL = m_networkLoad->currentRequest().url().string();
 
-    auto result = WebCore::URLPattern::create(data.match, WTF::move(currentURL), { });
-    if (result.hasException())
-        return;
-
     // 19.9 If pattern is failure or pattern has regexp groups, then return response.
-    if (result.returnValue()->hasRegExpGroups())
+    // The pattern is matched without a regular-expression engine so that no YARR code runs on this
+    // untrusted, network-supplied value inside the network process; createWithoutRegExpSupport()
+    // fails if the pattern is invalid or contains regexp groups.
+    auto result = WebCore::URLPattern::createWithoutRegExpSupport(data.match, WTF::move(currentURL), { });
+    if (result.hasException())
         return;
 
     // 19.10 Let expirationTime be the time at which the response becomes a stale response.
@@ -1270,6 +1309,36 @@ void NetworkResourceLoader::didReceiveResponse(ResourceResponse&& receivedRespon
                 protectedThis->didFailLoading(error);
         });
         return completionHandler(PolicyAction::Ignore);
+    }
+
+    // https://fetch.spec.whatwg.org/#determine-the-compression-dictionary-cache-partition
+    if (m_compressionDictionaryHash) {
+        // 14. Let codings be the result of extracting header list values given `Content-Encoding` and response’s header list.
+        auto codings = m_response.httpHeaderField(HTTPHeaderName::ContentEncoding);
+        // 15. If codings is null or does not contain `dcb` or `dcz`, then return response.
+        if (codings.isNull() || (!codings.contains("dcb"_s) && !codings.contains("dcz"_s))) {
+            // Continue to handle this request without a compression dictionary.
+            m_compressionDictionaryHash = std::nullopt;
+        } else {
+            // 16. If request’s response tainting is "opaque", then return a network error.
+            if (m_response.tainting() == ResourceResponse::Tainting::Opaque) {
+                LOADER_RELEASE_LOG_ERROR("didReceiveResponse: Interrupting worker load because a compression dictionary was used with an opaque response tainting.");
+                RunLoop::mainSingleton().dispatch([protectedThis = Ref { *this }, url = m_response.url()] {
+                    if (protectedThis->m_networkLoad)
+                        protectedThis->didFailLoading(ResourceError { errorDomainWebKitInternal, 0, url, "Worker load was blocked because a compression dictionary was used with an opaque response tainting."_s, ResourceError::Type::AccessControl });
+                });
+                return completionHandler(PolicyAction::Ignore);
+            }
+
+            // 17-20. The Available-Dictionary request header is added by the network library (e.g. libsoup),
+            //        not by WebKit, so it is not visible on m_networkLoad->currentRequest(). The hash we matched
+            //        (m_compressionDictionaryHash) is the authoritative value, and hash verification and decoding
+            //        are performed by the network library from the dictionary's buffer, so there is nothing to
+            //        validate here.
+
+            // 22. delete `Content-Encoding` from response’s header list.
+            m_response.sanitizeHTTPHeaderFields(ResourceResponseBase::SanitizationType::RemoveContentEncoding);
+        }
     }
 
     processClearSiteDataHeader(m_response, [this, protectedThis = Ref { *this }, privateRelayed, resourceLoadInfo = WTF::move(resourceLoadInfo), completionHandler = WTF::move(completionHandler)] () mutable {

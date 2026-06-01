@@ -528,11 +528,18 @@ void ResourceResponseBase::sanitizeHTTPHeaderFields(SanitizationType type)
 {
     lazyInit(AllFields);
 
+    if (type == SanitizationType::RemoveContentEncoding) {
+        m_httpHeaderFields.remove(HTTPHeaderName::ContentEncoding);
+        return;
+    }
+
     m_httpHeaderFields.remove(HTTPHeaderName::SetCookie);
     m_httpHeaderFields.remove(HTTPHeaderName::SetCookie2);
 
     switch (type) {
     case SanitizationType::RemoveCookies:
+        return;
+    case SanitizationType::RemoveContentEncoding:
         return;
     case SanitizationType::Redirection: {
         m_httpHeaderFields.commonHeaders().removeAllMatching([](auto& header) { return !isSafeRedirectionResponseHeader(header.key); });

@@ -67,6 +67,7 @@ private:
 
     enum class WasBlockingCookies : bool { No, Yes };
     void createRequest(WebCore::ResourceRequest&&, WasBlockingCookies);
+    void continueCreateRequestForRedirection(WebCore::ResourceRequest&&, WasBlockingCookies);
     void clearRequest();
 
     struct SendRequestData {
@@ -132,6 +133,9 @@ private:
 
     void didFail(const WebCore::ResourceError&);
 
+    static gboolean requestCompressionDictionaryCallback(SoupMessage*, SoupCompressionDictionaryRequest*, NetworkDataTaskSoup*);
+    void requestCompressionDictionary(SoupCompressionDictionaryRequest*);
+
     static void startingCallback(SoupMessage*, NetworkDataTaskSoup*);
     bool shouldAllowHSTSPolicySetting() const;
     bool shouldAllowHSTSProtocolUpgrade() const;
@@ -174,6 +178,9 @@ private:
     WebCore::NetworkLoadMetrics m_networkLoadMetrics;
     bool m_isBlockingCookies { false };
     RefPtr<WebCore::SecurityOrigin> m_sourceOrigin;
+    bool m_compressionDictionaryEnabled { false };
+    std::optional<std::array<uint8_t, 32>> m_compressionDictionaryHash;
+    WebCore::FetchOptionsDestination m_compressionDictionaryDestination { WebCore::FetchOptionsDestination::EmptyString };
     RunLoop::Timer m_timeoutSource;
 };
 

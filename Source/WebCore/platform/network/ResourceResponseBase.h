@@ -116,7 +116,7 @@ public:
     WEBCORE_EXPORT const HTTPHeaderMap& httpHeaderFields() const LIFETIME_BOUND;
     void setHTTPHeaderFields(HTTPHeaderMap&&);
 
-    enum class SanitizationType { Redirection, RemoveCookies, CrossOriginSafe };
+    enum class SanitizationType { Redirection, RemoveCookies, CrossOriginSafe, RemoveContentEncoding };
     WEBCORE_EXPORT void sanitizeHTTPHeaderFields(SanitizationType);
 
     String httpHeaderField(StringView name) const;

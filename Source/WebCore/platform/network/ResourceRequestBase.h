@@ -189,6 +189,8 @@ public:
     void removeHTTPHeaderField(const String& name);
     void removeHTTPHeaderField(HTTPHeaderName);
 
+    WEBCORE_EXPORT void setCompressionDictionaryIDHeader(const String&);
+
     WEBCORE_EXPORT bool hasHTTPHeaderField(HTTPHeaderName) const;
 
     // Instead of passing a string literal to any of these functions, just use a HTTPHeaderName instead.

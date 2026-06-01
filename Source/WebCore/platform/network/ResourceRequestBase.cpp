@@ -37,6 +37,8 @@
 #include "SecurityPolicy.h"
 #include <wtf/PointerComparison.h>
 #include <wtf/TZoneMallocInlines.h>
+#include <wtf/text/MakeString.h>
+#include <wtf/text/StringBuilder.h>
 
 namespace WebCore {
 
@@ -405,6 +407,18 @@ void ResourceRequestBase::setHTTPHeaderField(HTTPHeaderName name, const String& 
     m_requestData.m_httpHeaderFields.set(name, value);
 
     m_platformRequestUpdated = false;
+}
+
+void ResourceRequestBase::setCompressionDictionaryIDHeader(const String& id)
+{
+    if (id.isEmpty())
+        return;
+    // https://www.rfc-editor.org/info/rfc9651#name-serializing-a-string
+    StringBuilder idBuilder;
+    idBuilder.append('"');
+    idBuilder.append(makeStringByReplacingAll(makeStringByReplacingAll(id, '\\', "\\\\"_s), '"', "\\\""_s));
+    idBuilder.append('"');
+    setHTTPHeaderField(HTTPHeaderName::DictionaryID, idBuilder.toString());
 }
 
 void ResourceRequestBase::clearHTTPAuthorization()

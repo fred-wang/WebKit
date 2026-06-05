@@ -399,6 +399,8 @@ static Vector<std::pair<String, String>> collectVaryingRequestHeadersInternal(co
     Vector<std::pair<String, String>> headers;
     for (auto varyHeaderName : StringView(varyValue).split(',')) {
         auto headerName = varyHeaderName.trim(isUnicodeCompatibleASCIIWhitespace<char16_t>);
+        if (equalIgnoringASCIICase(headerName, "accept-encoding"_s) || equalIgnoringASCIICase(headerName, "available-dictionary"_s))
+            continue;
         headers.append(std::pair { headerName.toString(), headerValueForVaryFunction(headerName) });
     }
     return headers;

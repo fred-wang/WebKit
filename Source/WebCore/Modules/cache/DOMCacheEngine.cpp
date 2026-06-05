@@ -104,6 +104,8 @@ bool queryCacheMatch(const ResourceRequest& request, const ResourceRequest& cach
             isVarying = true;
             return;
         }
+        if (equalIgnoringASCIICase(nameView, "accept-encoding"_s) || equalIgnoringASCIICase(nameView, "available-dictionary"_s))
+            return;
         isVarying = cachedRequest.httpHeaderField(nameView) != request.httpHeaderField(nameView);
     });
 

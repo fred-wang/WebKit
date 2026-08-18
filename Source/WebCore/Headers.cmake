@@ -3770,6 +3770,7 @@ set(WebCore_PRIVATE_FRAMEWORK_HEADERS
     ${WebCore_DERIVED_SOURCES_DIR}/JSEvent.h
     ${WebCore_DERIVED_SOURCES_DIR}/JSEventTarget.h
     ${WebCore_DERIVED_SOURCES_DIR}/JSFile.h
+    ${WebCore_DERIVED_SOURCES_DIR}/JSFetchRequestDestination.h
     ${WebCore_DERIVED_SOURCES_DIR}/JSHTMLCollection.h
     ${WebCore_DERIVED_SOURCES_DIR}/JSHTMLOptionsCollection.h
     ${WebCore_DERIVED_SOURCES_DIR}/JSImageData.h

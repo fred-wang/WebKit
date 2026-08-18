@@ -2059,6 +2059,18 @@ void NetworkProcess::deleteWebsiteDataForOrigin(PAL::SessionID sessionID, Option
         if (CheckedPtr networkStorageSession = storageSession(sessionID))
             networkStorageSession->deleteCookies(origin, [clearTasksHandler] { });
     }
+
+    if (websiteDataTypes.containsAny({ WebsiteDataType::Cookies, WebsiteDataType::DiskCache }) && session) {
+        if (RefPtr cache = session->cache()) {
+            RegistrableDomain topDomain = RegistrableDomain::uncheckedCreateFromHost(origin.topOrigin.host());
+            String cachePartition = origin.clientOrigin == origin.topOrigin ? emptyString() : (topDomain.isEmpty() ? emptyString() : topDomain.string());
+            std::optional<SecurityOriginData> originToDelete;
+            if (origin.clientOrigin != origin.topOrigin)
+                originToDelete = origin.clientOrigin;
+            cache->removeCompressionDictionaries(cachePartition, WTF::move(originToDelete), [clearTasksHandler] { });
+        }
+    }
+
     if (websiteDataTypes.contains(WebsiteDataType::DiskCache) && !sessionID.isEphemeral() && session) {
         if (RefPtr cache = session->cache()) {
             Vector<NetworkCache::Key> cacheKeysToDelete;

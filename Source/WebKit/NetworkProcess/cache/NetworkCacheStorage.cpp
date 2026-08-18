@@ -206,11 +206,12 @@ void Storage::ReadOperation::finishReadBlob(BlobStorage::Blob&& blob, MonotonicT
 class Storage::WriteOperation {
     WTF_MAKE_TZONE_ALLOCATED(Storage::WriteOperation);
 public:
-    WriteOperation(const Record& record, MappedBodyHandler&& mappedBodyHandler, bool storeBlobInMemoryCache)
+    WriteOperation(const Record& record, MappedBodyHandler&& mappedBodyHandler, bool storeBlobInMemoryCache, StoreHandler&& storeHandler)
         : m_identifier(Storage::WriteOperationIdentifier::generate())
         , m_record(record)
         , m_mappedBodyHandler(WTF::move(mappedBodyHandler))
         , m_storeBlobInMemoryCache(storeBlobInMemoryCache)
+        , m_storeHandler(WTF::move(storeHandler))
     {
         ASSERT(isMainRunLoop());
     }
@@ -223,6 +224,7 @@ public:
     Storage::WriteOperationIdentifier NODELETE identifier() const { return m_identifier; }
     const Record& NODELETE record() const WTF_REQUIRES_CAPABILITY(mainThread) { return m_record; }
     void invokeMappedBodyHandler(const Data&);
+    void invokeStoreHandler();
     bool NODELETE storeBlobInMemoryCache() const { return m_storeBlobInMemoryCache; }
 
 private:
@@ -230,6 +232,7 @@ private:
     const Record m_record;
     const MappedBodyHandler m_mappedBodyHandler;
     bool m_storeBlobInMemoryCache;
+    StoreHandler m_storeHandler;
 };
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(Storage::WriteOperation);
@@ -238,6 +241,12 @@ void Storage::WriteOperation::invokeMappedBodyHandler(const Data& data)
 {
     if (m_mappedBodyHandler)
         m_mappedBodyHandler(data);
+}
+
+void Storage::WriteOperation::invokeStoreHandler()
+{
+    if (m_storeHandler)
+        m_storeHandler(m_record);
 }
 
 class TraverseOperation final : public ThreadSafeRefCounted<TraverseOperation, WTF::DestructionThread::MainRunLoop> {
@@ -1082,6 +1091,7 @@ void Storage::finishWriteOperationActivity(WriteOperationIdentifier identifier)
 
     auto writeOperation = m_activeWriteOperations.take(identifier);
     RELEASE_ASSERT(writeOperation);
+    writeOperation->invokeStoreHandler();
 
     dispatchPendingWriteOperations();
 
@@ -1116,7 +1126,7 @@ void Storage::retrieve(const Key& key, unsigned priority, RetrieveCompletionHand
     dispatchPendingReadOperations();
 }
 
-void Storage::store(const Record& record, MappedBodyHandler&& mappedBodyHandler, bool storeBlobInMemoryCache)
+void Storage::store(const Record& record, MappedBodyHandler&& mappedBodyHandler, bool storeBlobInMemoryCache, StoreHandler&& storeHandler)
 {
     ASSERT(RunLoop::isMain());
     ASSERT(!record.key.isNull());
@@ -1124,7 +1134,7 @@ void Storage::store(const Record& record, MappedBodyHandler&& mappedBodyHandler,
     if (!m_capacity)
         return;
 
-    auto writeOperation = makeUnique<WriteOperation>(record, WTF::move(mappedBodyHandler), storeBlobInMemoryCache);
+    auto writeOperation = makeUnique<WriteOperation>(record, WTF::move(mappedBodyHandler), storeBlobInMemoryCache, WTF::move(storeHandler));
     m_pendingWriteOperations.prepend(WTF::move(writeOperation));
 
     // Add key to the filter already here as we do lookups from the pending operations too.

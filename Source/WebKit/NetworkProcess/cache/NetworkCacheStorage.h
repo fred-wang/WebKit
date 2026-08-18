@@ -103,7 +103,8 @@ public:
     void retrieve(const Key&, unsigned priority, RetrieveCompletionHandler&&);
 
     using MappedBodyHandler = Function<void (const Data& mappedBody)>;
-    void store(const Record&, MappedBodyHandler&&, bool storeBlobInMemoryCache = false);
+    using StoreHandler = Function<void(const Record&)>;
+    void store(const Record&, MappedBodyHandler&&, bool storeBlobInMemoryCache = false, StoreHandler&& = { });
 
     void remove(const Key&);
     void remove(const Vector<Key>&, CompletionHandler<void()>&&);
